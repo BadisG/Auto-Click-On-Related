@@ -12,7 +12,7 @@
 (function() {
     'use strict';
 
-    const ENABLE_LOGGING = true;
+    const ENABLE_LOGGING = false;
     let clickTimer = null;
     let retryTimer = null;
     let tabFocusRetryTimer = null;
