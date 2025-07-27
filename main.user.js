@@ -12,7 +12,7 @@
 (function() {
     'use strict';
 
-    const ENABLE_LOGGING = true;
+    const ENABLE_LOGGING = false;
     let clickTimer = null;
 
     function log(...args) {
