@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Auto-Click Related
 // @namespace    http://tampermonkey.net/
-// @version      1.6
+// @version      1.7
 // @description  Persistently selects Related filter (or first valid alternative), re-clicks if YouTube resets it
 // @match        https://www.youtube.com/*
 // @author       BadisG
@@ -82,6 +82,7 @@
         if (!chipText) return true;
         if (chipText === 'All') return true;
         if (chipText.startsWith('From ')) return true;
+        if (chipText.startsWith('For ')) return true;
         return false;
     }
 
