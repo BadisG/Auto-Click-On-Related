@@ -1,21 +1,27 @@
 // ==UserScript==
-// @name        YouTube Auto-Click Related
-// @namespace   http://tampermonkey.net/
-// @version     1.5
-// @description Uses YouTube's navigation endpoint to trigger Related filter
-// @match       https://www.youtube.com/*
-// @author      BadisG
-// @grant       none
-// @run-at      document-idle
+// @name         YouTube Auto-Click Related (Sticky)
+// @namespace    http://tampermonkey.net/
+// @version      1.6
+// @description  Persistently selects Related filter (or first valid alternative), re-clicks if YouTube resets it
+// @match        https://www.youtube.com/*
+// @author       BadisG
+// @grant        none
+// @run-at       document-start
 // ==/UserScript==
 
 (function() {
     'use strict';
 
     const ENABLE_LOGGING = false;
-    let lastProcessedUrl = null;
-    let isProcessing = false;
-    let selectionComplete = false;
+    const POLL_INTERVAL = 100;
+    const STABLE_DURATION = 1500;
+    const MAX_POLL_TIME = 20000;
+
+    let lastVideoId = null;
+    let pollTimer = null;
+    let pollStartTime = 0;
+    let lastSelectedTime = 0;
+    let targetChipName = null;
 
     function log(...args) {
         if (ENABLE_LOGGING) {
@@ -27,403 +33,241 @@
         return window.location.pathname === '/watch';
     }
 
-    function sleep(ms) {
-        return new Promise(resolve => setTimeout(resolve, ms));
+    function getVideoId() {
+        return new URLSearchParams(window.location.search).get('v');
     }
 
-    function getRelatedChipCloudRenderer() {
-        return document.querySelector('yt-related-chip-cloud-renderer');
+    /**
+     * Get all chip elements
+     */
+    function getChips() {
+        // Try related chip cloud first, then general chip cloud
+        let chips = document.querySelectorAll('yt-related-chip-cloud-renderer yt-chip-cloud-chip-renderer');
+        if (chips.length === 0) {
+            chips = document.querySelectorAll('#related yt-chip-cloud-chip-renderer');
+        }
+        if (chips.length === 0) {
+            chips = document.querySelectorAll('yt-chip-cloud-renderer yt-chip-cloud-chip-renderer');
+        }
+        return chips;
     }
 
-    function findRelatedChipData() {
-        const relatedCloud = getRelatedChipCloudRenderer();
-        if (!relatedCloud) {
-            log('No yt-related-chip-cloud-renderer found');
-            return null;
-        }
-
-        // Access the Polymer element's data
-        const data = relatedCloud.__data || relatedCloud.data;
-        if (!data) {
-            log('No data on relatedCloud');
-            return null;
-        }
-
-        log('RelatedCloud data keys:', Object.keys(data));
-
-        // Look for the chip cloud data
-        if (data.content && data.content.chipCloudRenderer) {
-            const chips = data.content.chipCloudRenderer.chips;
-            if (chips && Array.isArray(chips)) {
-                log(`Found ${chips.length} chips in data`);
-
-                for (let i = 0; i < chips.length; i++) {
-                    const chip = chips[i];
-                    if (chip.chipCloudChipRenderer) {
-                        const text = chip.chipCloudChipRenderer.text;
-                        const chipText = text?.simpleText || text?.runs?.[0]?.text || '';
-                        log(`  Chip ${i}: "${chipText}", isSelected: ${chip.chipCloudChipRenderer.isSelected}`);
-
-                        if (chipText === 'Related') {
-                            return {
-                                index: i,
-                                chipData: chip.chipCloudChipRenderer,
-                                navigationEndpoint: chip.chipCloudChipRenderer.navigationEndpoint,
-                                isSelected: chip.chipCloudChipRenderer.isSelected
-                            };
-                        }
+    /**
+     * Get clean text from a chip
+     */
+    function getChipText(chip) {
+        const button = chip.querySelector('button');
+        if (button) {
+            // Get the chip shape div which contains the text
+            const chipDiv = button.querySelector('.ytChipShapeChip, [id="text"]');
+            if (chipDiv) {
+                // Extract only direct text nodes (not nested element text)
+                let text = '';
+                for (const node of chipDiv.childNodes) {
+                    if (node.nodeType === Node.TEXT_NODE) {
+                        text += node.textContent;
                     }
                 }
+                if (text.trim()) return text.trim();
             }
+        }
+        // Fallback
+        return chip.textContent?.trim() || '';
+    }
+
+    /**
+     * Check if a chip name should be skipped
+     */
+    function shouldSkipChip(chipText) {
+        if (!chipText) return true;
+        if (chipText === 'All') return true;
+        if (chipText.startsWith('From ')) return true;
+        return false;
+    }
+
+    /**
+     * Find the target chip to click
+     * Priority: "Related" first, then first valid alternative
+     */
+    function findTargetChip() {
+        const chips = getChips();
+        let fallbackChip = null;
+        let fallbackName = null;
+        let fallbackButton = null;
+
+        for (const chip of chips) {
+            const chipText = getChipText(chip);
+            const button = chip.querySelector('button');
+
+            if (!button || !chipText) continue;
+
+            // Priority 1: "Related" chip
+            if (chipText === 'Related') {
+                return { chip, button, name: 'Related' };
+            }
+
+            // Track first valid fallback (skip "All" and "From ...")
+            if (!fallbackChip && !shouldSkipChip(chipText)) {
+                fallbackChip = chip;
+                fallbackName = chipText;
+                fallbackButton = button;
+            }
+        }
+
+        // Return fallback if no "Related" found
+        if (fallbackChip) {
+            return { chip: fallbackChip, button: fallbackButton, name: fallbackName };
         }
 
         return null;
     }
 
     /**
-     * Execute the navigation endpoint command
+     * Check if our target chip is currently selected
      */
-    function executeNavigationEndpoint(endpoint, relatedCloud) {
-        log('Attempting to execute navigation endpoint...');
-        log('Endpoint:', JSON.stringify(endpoint, null, 2));
+    function isTargetSelected() {
+        if (!targetChipName) return false;
 
-        if (!endpoint) {
-            log('No endpoint provided');
-            return false;
-        }
-
-        // Method 1: Try using YouTube's built-in navigation
-        if (endpoint.continuationCommand) {
-            log('Found continuationCommand');
-
-            // Try to find and call the handleRelatedChipCommand with proper data
-            if (typeof relatedCloud.handleRelatedChipCommand === 'function') {
-                try {
-                    // Create a properly structured event/data object
-                    const commandData = {
-                        continuationCommand: endpoint.continuationCommand
-                    };
-                    log('Calling handleRelatedChipCommand with:', commandData);
-                    relatedCloud.handleRelatedChipCommand(commandData);
-                    return true;
-                } catch (e) {
-                    log('handleRelatedChipCommand failed:', e.message);
-                }
-            }
-
-            // Method 2: Try to use ytd-app's navigation
-            const ytdApp = document.querySelector('ytd-app');
-            if (ytdApp) {
-                // Try various navigation methods
-                const navMethods = ['handleNavigate_', 'navigate_', 'handleAction_', 'sendAction_'];
-                for (const method of navMethods) {
-                    if (typeof ytdApp[method] === 'function') {
-                        log(`Trying ytd-app.${method}`);
-                        try {
-                            ytdApp[method]({ endpoint: endpoint });
-                        } catch (e) {
-                            log(`  ${method} failed:`, e.message);
-                        }
-                    }
-                }
-            }
-
-            // Method 3: Try to manually trigger the continuation
-            if (endpoint.continuationCommand.token) {
-                log('Has continuation token, attempting fetch...');
-                return triggerContinuationFetch(endpoint.continuationCommand);
-            }
-        }
-
-        return false;
-    }
-
-    /**
-     * Manually trigger the continuation fetch
-     */
-    async function triggerContinuationFetch(continuationCommand) {
-        log('Triggering continuation fetch...');
-
-        const token = continuationCommand.token;
-        const request = continuationCommand.request || 'CONTINUATION_REQUEST_TYPE_WATCH_NEXT';
-
-        log('Token:', token?.substring(0, 50) + '...');
-        log('Request type:', request);
-
-        // Try to find the API endpoint and make the request
-        try {
-            // Get the innertube API key
-            const ytcfg = window.ytcfg?.data_ || window.ytcfg?.get?.('INNERTUBE_API_KEY');
-            const apiKey = typeof ytcfg === 'object' ? ytcfg.INNERTUBE_API_KEY : ytcfg;
-
-            if (!apiKey) {
-                log('Could not find API key');
-                return false;
-            }
-
-            log('API Key found:', apiKey?.substring(0, 10) + '...');
-
-            // Make the continuation request
-            const response = await fetch(`https://www.youtube.com/youtubei/v1/next?key=${apiKey}`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    context: window.ytcfg?.data_?.INNERTUBE_CONTEXT || {
-                        client: {
-                            clientName: 'WEB',
-                            clientVersion: '2.20240101.00.00'
-                        }
-                    },
-                    continuation: token
-                }),
-                credentials: 'include'
-            });
-
-            if (response.ok) {
-                const data = await response.json();
-                log('Continuation response received!');
-                log('Response keys:', Object.keys(data));
-
-                // Now we need to update the UI with this data
-                // This is the tricky part - we need to inject this into YouTube's state
-                return updateUIWithContinuationData(data);
-            } else {
-                log('Continuation request failed:', response.status);
-            }
-        } catch (e) {
-            log('Error fetching continuation:', e.message);
-        }
-
-        return false;
-    }
-
-    /**
-     * Update the UI with the continuation data
-     */
-    function updateUIWithContinuationData(data) {
-        log('Attempting to update UI with new data...');
-
-        // Find the secondary results renderer and update it
-        const secondaryResults = document.querySelector('ytd-watch-next-secondary-results-renderer');
-        if (secondaryResults && secondaryResults.__data) {
-            log('Found secondary results renderer');
-
-            // Look for the new results in the continuation data
-            if (data.onResponseReceivedEndpoints) {
-                for (const endpoint of data.onResponseReceivedEndpoints) {
-                    if (endpoint.reloadContinuationItemsCommand) {
-                        log('Found reloadContinuationItemsCommand');
-                        // This would need to trigger Polymer's data binding
-                        // which is complex to do externally
-                    }
-                    if (endpoint.appendContinuationItemsAction) {
-                        log('Found appendContinuationItemsAction');
-                    }
-                }
-            }
-        }
-
-        return false;
-    }
-
-    /**
-     * Simpler approach: Just click the chip element directly with better targeting
-     */
-    async function clickChipDirectly() {
-        log('Attempting direct chip click...');
-
-        const chips = document.querySelectorAll('yt-related-chip-cloud-renderer yt-chip-cloud-chip-renderer');
-
+        const chips = getChips();
         for (const chip of chips) {
-            if (chip.textContent.trim() === 'Related') {
+            const chipText = getChipText(chip);
+            if (chipText === targetChipName) {
                 const button = chip.querySelector('button');
-                if (button) {
-                    // Check if already selected
-                    if (button.getAttribute('aria-selected') === 'true') {
-                        log('Already selected!');
-                        return true;
-                    }
-
-                    log('Found Related button, focusing and clicking...');
-
-                    // Focus first
-                    button.focus();
-                    await sleep(50);
-
-                    // Try the direct click
-                    button.click();
-                    await sleep(100);
-
-                    // Check if it worked
-                    if (button.getAttribute('aria-selected') === 'true') {
-                        log('Click worked!');
-                        return true;
-                    }
-
-                    // If not, try triggering via the chip-shape
-                    const chipShape = chip.querySelector('chip-shape');
-                    if (chipShape) {
-                        chipShape.click();
-                        await sleep(100);
-                    }
-
-                    return button.getAttribute('aria-selected') === 'true';
-                }
+                return button?.getAttribute('aria-selected') === 'true';
             }
         }
-
         return false;
     }
 
     /**
-     * Main function
+     * Click the target chip (Related or fallback)
      */
-    async function selectRelatedChip() {
-        if (isProcessing) {
-            log('Already processing, skipping');
-            return;
+    function clickTargetChip() {
+        const target = findTargetChip();
+
+        if (!target) {
+            return 'not-found';
         }
 
-        if (selectionComplete) {
-            log('Selection already complete');
-            return;
+        // Update our target name
+        if (targetChipName !== target.name) {
+            log(`🎯 Target chip: "${target.name}"`);
+            targetChipName = target.name;
         }
 
-        if (!isWatchPage()) {
-            log('Not on watch page');
-            return;
+        if (target.button.getAttribute('aria-selected') === 'true') {
+            return 'already-selected';
         }
 
-        isProcessing = true;
-        log('\n========== ATTEMPTING SELECTION ==========');
+        target.button.click();
+        log(`🖱️ Clicked "${target.name}"`);
+        return 'clicked';
+    }
 
-        try {
-            // First, try the simple click approach
-            const clickWorked = await clickChipDirectly();
-            if (clickWorked) {
-                log('✅ SUCCESS via direct click!');
-                selectionComplete = true;
-                isProcessing = false;
+    /**
+     * Main polling loop - keeps checking and re-clicking if needed
+     */
+    function startPolling() {
+        stopPolling();
+        pollStartTime = Date.now();
+        lastSelectedTime = 0;
+        targetChipName = null;
+
+        log('▶️ Starting poll loop');
+
+        pollTimer = setInterval(() => {
+            if (!isWatchPage()) {
+                log('⏹️ Not on watch page');
+                stopPolling();
                 return;
             }
 
-            // Get the chip data with navigation endpoint
-            const chipInfo = findRelatedChipData();
+            const elapsed = Date.now() - pollStartTime;
 
-            if (!chipInfo) {
-                log('Could not find Related chip data');
-                isProcessing = false;
-                scheduleRetry();
+            if (elapsed > MAX_POLL_TIME) {
+                log('⏱️ Timeout reached');
+                stopPolling();
                 return;
             }
 
-            if (chipInfo.isSelected) {
-                log('✅ Related chip is already selected in data!');
-                selectionComplete = true;
-                isProcessing = false;
-                return;
-            }
+            const selected = isTargetSelected();
 
-            log('Found Related chip at index', chipInfo.index);
-            log('Has navigationEndpoint:', !!chipInfo.navigationEndpoint);
+            if (selected) {
+                if (lastSelectedTime === 0) {
+                    lastSelectedTime = Date.now();
+                    log(`✓ "${targetChipName}" is selected, waiting for stability...`);
+                }
 
-            // Try to execute the navigation endpoint
-            const relatedCloud = getRelatedChipCloudRenderer();
-            if (chipInfo.navigationEndpoint && relatedCloud) {
-                const success = executeNavigationEndpoint(chipInfo.navigationEndpoint, relatedCloud);
-                if (success) {
-                    log('Navigation endpoint executed');
-                    await sleep(500);
+                const stableFor = Date.now() - lastSelectedTime;
+                if (stableFor >= STABLE_DURATION) {
+                    log(`✅ SUCCESS! "${targetChipName}" stable for ${stableFor}ms`);
+                    stopPolling();
+                    return;
+                }
+            } else {
+                if (lastSelectedTime > 0) {
+                    log('⚠️ YouTube RESET the selection! Re-clicking...');
+                }
+                lastSelectedTime = 0;
 
-                    // Verify
-                    const newInfo = findRelatedChipData();
-                    if (newInfo?.isSelected) {
-                        log('✅ SUCCESS! Related is now selected!');
-                        selectionComplete = true;
-                        isProcessing = false;
-                        return;
-                    }
+                const result = clickTargetChip();
+                if (result === 'not-found') {
+                    // Chips not in DOM yet, keep waiting
                 }
             }
-
-            log('❌ Could not activate Related chip');
-            scheduleRetry();
-
-        } catch (e) {
-            log('Error:', e.message);
-            scheduleRetry();
-        }
-
-        isProcessing = false;
+        }, POLL_INTERVAL);
     }
 
-    let retryCount = 0;
-    const MAX_RETRIES = 5;
-    let retryTimer = null;
-
-    function scheduleRetry() {
-        if (retryTimer) {
-            clearTimeout(retryTimer);
-        }
-
-        retryCount++;
-        if (retryCount <= MAX_RETRIES) {
-            log(`Scheduling retry ${retryCount}/${MAX_RETRIES} in 3 seconds...`);
-            retryTimer = setTimeout(() => {
-                isProcessing = false;
-                selectRelatedChip();
-            }, 3000);
-        } else {
-            log('Max retries reached. Giving up.');
-            log('\n⚠️ YouTube appears to block automated chip selection.');
-            log('The navigation endpoint exists but cannot be triggered externally.');
+    function stopPolling() {
+        if (pollTimer) {
+            clearInterval(pollTimer);
+            pollTimer = null;
+            log('⏹️ Polling stopped');
         }
     }
 
-    function handlePageChange() {
-        const currentUrl = window.location.href;
-
-        if (currentUrl === lastProcessedUrl) {
-            return;
-        }
-
-        log('\n🔄 PAGE CHANGE:', currentUrl);
-        lastProcessedUrl = currentUrl;
-        selectionComplete = false;
-        isProcessing = false;
-        retryCount = 0;
-
-        if (retryTimer) {
-            clearTimeout(retryTimer);
-            retryTimer = null;
-        }
+    /**
+     * Handle navigation
+     */
+    function handleNavigation() {
+        const videoId = getVideoId();
 
         if (!isWatchPage()) {
-            log('Not a watch page, ignoring');
+            stopPolling();
+            lastVideoId = null;
             return;
         }
 
-        // Wait for page to load
-        log('Scheduling selection in 2.5 seconds...');
-        setTimeout(selectRelatedChip, 2500);
+        if (videoId === lastVideoId && pollTimer === null && isTargetSelected()) {
+            log('↩️ Same video, already selected');
+            return;
+        }
+
+        if (videoId !== lastVideoId) {
+            log('🔄 New video:', videoId);
+            lastVideoId = videoId;
+        }
+
+        startPolling();
     }
 
-    // Initialize
-    log('🚀 Script initialized v5.0.0');
+    // ===== INITIALIZATION =====
+    log('🚀 Script initialized (v2.2 - with fallback)');
 
-    window.addEventListener('yt-navigate-finish', handlePageChange);
+    window.addEventListener('yt-navigate-finish', handleNavigation);
+    window.addEventListener('yt-page-data-updated', handleNavigation);
+    window.addEventListener('popstate', () => setTimeout(handleNavigation, 0));
 
-    // Only handle visibility change if we haven't completed
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', handleNavigation);
+    } else {
+        handleNavigation();
+    }
+
     document.addEventListener('visibilitychange', () => {
-        if (!document.hidden && isWatchPage() && !selectionComplete && !isProcessing) {
-            log('Tab became visible, checking...');
-            setTimeout(selectRelatedChip, 1000);
+        if (!document.hidden && isWatchPage()) {
+            log('👁️ Tab became visible');
+            startPolling();
         }
     });
-
-    // Initial run
-    handlePageChange();
-
 })();
