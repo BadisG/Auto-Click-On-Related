@@ -12,7 +12,7 @@
 (function() {
     'use strict';
 
-    const ENABLE_LOGGING = true;
+    const ENABLE_LOGGING = false;
     let lastProcessedUrl = null;
     let isProcessing = false;
     let selectionComplete = false;
