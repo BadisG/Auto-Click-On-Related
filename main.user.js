@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         YouTube Auto-Click Related (Sticky)
+// @name         YouTube Auto-Click Related
 // @namespace    http://tampermonkey.net/
 // @version      1.6
 // @description  Persistently selects Related filter (or first valid alternative), re-clicks if YouTube resets it
