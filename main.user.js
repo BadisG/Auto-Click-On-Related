@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        YouTube Auto-Click Related
 // @namespace   http://tampermonkey.net/
-// @version     1.3
+// @version     1.4
 // @description Automated clicking of "Related" on YouTube
 // @match       https://www.youtube.com/*
 // @author      BadisG
@@ -20,6 +20,7 @@
     let lastClickedChip = null;
     let lastProcessedUrl = null; // Track last URL to prevent duplicate processing
     let isProcessing = false; // Prevent concurrent processing
+    let relatedConfirmedSelected = false; // Track if Related is confirmed selected
 
     function log(...args) {
         if (ENABLE_LOGGING) {
@@ -85,6 +86,26 @@
 
             checkChips();
         });
+    }
+
+    /**
+     * Check if Related chip is already selected
+     */
+    function isRelatedChipSelected() {
+        const chipContainer = getVisibleChipContainer();
+        if (!chipContainer) return false;
+
+        const chips = chipContainer.querySelectorAll('yt-chip-cloud-chip-renderer');
+        for (let chip of chips) {
+            const chipText = chip.textContent.trim();
+            if (chipText === 'Related') {
+                const button = chip.querySelector('button.ytChipShapeButtonReset') || chip.querySelector('button');
+                if (button && button.getAttribute('aria-selected') === 'true') {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     /**
@@ -172,6 +193,12 @@
     async function selectBestChip() {
         if (isProcessing) {
             log('⚠️ Already processing, skipping duplicate call');
+            return;
+        }
+
+        // If Related is already confirmed selected, don't do anything
+        if (relatedConfirmedSelected && isRelatedChipSelected()) {
+            log('✓ Related chip already confirmed selected, skipping processing');
             return;
         }
 
@@ -269,12 +296,14 @@
                     } else {
                         log('✅ Successfully clicked Related chip!');
                         log(`Total attempts needed: ${clickAttemptCount}`);
+                        relatedConfirmedSelected = true; // Mark as confirmed
                         isProcessing = false;
                     }
                 }, 800);
             } else {
                 log(`✓ Chip "${chipText}" is already selected. No action needed.`);
                 log(`========== END OF ATTEMPT #${clickAttemptCount} ==========\n`);
+                relatedConfirmedSelected = true; // Mark as confirmed
                 isProcessing = false;
             }
         } else {
@@ -323,6 +352,7 @@
         if (!isWatchPage()) {
             log('Not a watch page, script will remain idle.');
             lastProcessedUrl = currentUrl;
+            relatedConfirmedSelected = false; // Reset flag
             return;
         }
 
@@ -338,6 +368,7 @@
         clickAttemptCount = 0;
         lastClickedChip = null;
         isProcessing = false;
+        relatedConfirmedSelected = false; // Reset flag for new page
 
         // Clear any existing timers
         if (clickTimer) {
@@ -365,6 +396,13 @@
 
         if (!document.hidden && isWatchPage()) {
             log('Tab became visible, checking if chip selection needed...');
+
+            // CRITICAL FIX: Don't reprocess if already confirmed
+            if (relatedConfirmedSelected && isRelatedChipSelected()) {
+                log('Related chip already confirmed selected, no action needed');
+                return;
+            }
+
             setTimeout(() => {
                 // Check if Related chip is already selected
                 const chipContainer = getVisibleChipContainer();
@@ -377,6 +415,7 @@
                             const button = chip.querySelector('button.ytChipShapeButtonReset') || chip.querySelector('button');
                             if (button && button.getAttribute('aria-selected') === 'true') {
                                 relatedSelected = true;
+                                relatedConfirmedSelected = true; // Mark as confirmed
                                 break;
                             }
                         }
