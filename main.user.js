@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Auto-Click Related
 // @namespace    http://tampermonkey.net/
-// @version      1.7
+// @version      1.8
 // @description  Persistently selects Related filter (or first valid alternative), re-clicks if YouTube resets it
 // @match        https://www.youtube.com/*
 // @author       BadisG
@@ -81,6 +81,8 @@
     function shouldSkipChip(chipText) {
         if (!chipText) return true;
         if (chipText === 'All') return true;
+        if (chipText === 'Watched') return true;
+        if (chipText === 'Recently uploaded') return true;
         if (chipText.startsWith('From ')) return true;
         if (chipText.startsWith('For ')) return true;
         return false;
@@ -107,7 +109,7 @@
                 return { chip, button, name: 'Related' };
             }
 
-            // Track first valid fallback (skip "All" and "From ...")
+            // Track first valid fallback (skip unwanted chips)
             if (!fallbackChip && !shouldSkipChip(chipText)) {
                 fallbackChip = chip;
                 fallbackName = chipText;
@@ -253,7 +255,7 @@
     }
 
     // ===== INITIALIZATION =====
-    log('🚀 Script initialized (v2.2 - with fallback)');
+    log('🚀 Script initialized (v1.8 - excludes Watched & Recently uploaded)');
 
     window.addEventListener('yt-navigate-finish', handleNavigation);
     window.addEventListener('yt-page-data-updated', handleNavigation);
