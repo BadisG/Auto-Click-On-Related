@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Auto-Click Related
 // @namespace    http://tampermonkey.net/
-// @version      1.8
+// @version      1.9
 // @description  Persistently selects Related filter (or first valid alternative), re-clicks if YouTube resets it
 // @match        https://www.youtube.com/*
 // @author       BadisG
@@ -37,11 +37,7 @@
         return new URLSearchParams(window.location.search).get('v');
     }
 
-    /**
-     * Get all chip elements
-     */
     function getChips() {
-        // Try related chip cloud first, then general chip cloud
         let chips = document.querySelectorAll('yt-related-chip-cloud-renderer yt-chip-cloud-chip-renderer');
         if (chips.length === 0) {
             chips = document.querySelectorAll('#related yt-chip-cloud-chip-renderer');
@@ -52,16 +48,11 @@
         return chips;
     }
 
-    /**
-     * Get clean text from a chip
-     */
     function getChipText(chip) {
         const button = chip.querySelector('button');
         if (button) {
-            // Get the chip shape div which contains the text
             const chipDiv = button.querySelector('.ytChipShapeChip, [id="text"]');
             if (chipDiv) {
-                // Extract only direct text nodes (not nested element text)
                 let text = '';
                 for (const node of chipDiv.childNodes) {
                     if (node.nodeType === Node.TEXT_NODE) {
@@ -71,13 +62,9 @@
                 if (text.trim()) return text.trim();
             }
         }
-        // Fallback
         return chip.textContent?.trim() || '';
     }
 
-    /**
-     * Check if a chip name should be skipped
-     */
     function shouldSkipChip(chipText) {
         if (!chipText) return true;
         if (chipText === 'All') return true;
@@ -89,11 +76,17 @@
     }
 
     /**
-     * Find the target chip to click
-     * Priority: "Related" first, then first valid alternative
+     * Find the target chip to click.
+     * Returns: { chip, button, name } if a valid target exists,
+     *          null if chips aren't in the DOM yet (keep waiting),
+     *          'no-valid-target' if chips ARE loaded but none pass the filter (give up).
      */
     function findTargetChip() {
         const chips = getChips();
+
+        // Chips not loaded yet — signal caller to keep waiting
+        if (chips.length === 0) return null;
+
         let fallbackChip = null;
         let fallbackName = null;
         let fallbackButton = null;
@@ -104,12 +97,10 @@
 
             if (!button || !chipText) continue;
 
-            // Priority 1: "Related" chip
             if (chipText === 'Related') {
                 return { chip, button, name: 'Related' };
             }
 
-            // Track first valid fallback (skip unwanted chips)
             if (!fallbackChip && !shouldSkipChip(chipText)) {
                 fallbackChip = chip;
                 fallbackName = chipText;
@@ -117,17 +108,14 @@
             }
         }
 
-        // Return fallback if no "Related" found
         if (fallbackChip) {
             return { chip: fallbackChip, button: fallbackButton, name: fallbackName };
         }
 
-        return null;
+        // Chips are loaded but every single one is in the skip list (e.g. only All + Watched)
+        return 'no-valid-target';
     }
 
-    /**
-     * Check if our target chip is currently selected
-     */
     function isTargetSelected() {
         if (!targetChipName) return false;
 
@@ -143,16 +131,18 @@
     }
 
     /**
-     * Click the target chip (Related or fallback)
+     * Click the target chip.
+     * Returns: 'clicked' | 'already-selected' | 'not-found' | 'no-valid-target'
      */
     function clickTargetChip() {
         const target = findTargetChip();
 
-        if (!target) {
-            return 'not-found';
-        }
+        // Chips not in DOM yet
+        if (target === null) return 'not-found';
 
-        // Update our target name
+        // Chips loaded but nothing actionable — bail out entirely
+        if (target === 'no-valid-target') return 'no-valid-target';
+
         if (targetChipName !== target.name) {
             log(`🎯 Target chip: "${target.name}"`);
             targetChipName = target.name;
@@ -167,9 +157,6 @@
         return 'clicked';
     }
 
-    /**
-     * Main polling loop - keeps checking and re-clicking if needed
-     */
     function startPolling() {
         stopPolling();
         pollStartTime = Date.now();
@@ -214,9 +201,15 @@
                 lastSelectedTime = 0;
 
                 const result = clickTargetChip();
-                if (result === 'not-found') {
-                    // Chips not in DOM yet, keep waiting
+
+                if (result === 'no-valid-target') {
+                    // Only skippable chips present (e.g. All + Watched) — leave YouTube alone
+                    log('🚫 No valid target chips found, leaving default selection intact');
+                    stopPolling();
+                    return;
                 }
+
+                // 'not-found' → chips not loaded yet, keep waiting
             }
         }, POLL_INTERVAL);
     }
@@ -229,9 +222,6 @@
         }
     }
 
-    /**
-     * Handle navigation
-     */
     function handleNavigation() {
         const videoId = getVideoId();
 
@@ -255,7 +245,7 @@
     }
 
     // ===== INITIALIZATION =====
-    log('🚀 Script initialized (v1.8 - excludes Watched & Recently uploaded)');
+    log('🚀 Script initialized (v1.9 - stops gracefully when only skippable chips exist)');
 
     window.addEventListener('yt-navigate-finish', handleNavigation);
     window.addEventListener('yt-page-data-updated', handleNavigation);
