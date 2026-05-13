@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube Auto-Click Related
 // @namespace    http://tampermonkey.net/
-// @version      1.9
+// @version      2.0
 // @description  Persistently selects Related filter (or first valid alternative), re-clicks if YouTube resets it
 // @match        https://www.youtube.com/*
 // @author       BadisG
@@ -38,31 +38,34 @@
     }
 
     function getChips() {
-        let chips = document.querySelectorAll('yt-related-chip-cloud-renderer yt-chip-cloud-chip-renderer');
-        if (chips.length === 0) {
-            chips = document.querySelectorAll('#related yt-chip-cloud-chip-renderer');
+        // YouTube caches old pages in the DOM. We MUST filter for visible elements
+        // so we don't accidentally interact with a hidden video's chips.
+        const selectors = [
+            'yt-related-chip-cloud-renderer yt-chip-cloud-chip-renderer',
+            '#related yt-chip-cloud-chip-renderer',
+            'yt-chip-cloud-renderer yt-chip-cloud-chip-renderer'
+        ];
+
+        for (const selector of selectors) {
+            const allChips = document.querySelectorAll(selector);
+            // Filter to only elements that are actually rendered/visible on screen
+            const visibleChips = Array.from(allChips).filter(chip => chip.getBoundingClientRect().width > 0);
+            if (visibleChips.length > 0) {
+                return visibleChips;
+            }
         }
-        if (chips.length === 0) {
-            chips = document.querySelectorAll('yt-chip-cloud-renderer yt-chip-cloud-chip-renderer');
-        }
-        return chips;
+        return[];
     }
 
     function getChipText(chip) {
-        const button = chip.querySelector('button');
-        if (button) {
-            const chipDiv = button.querySelector('.ytChipShapeChip, [id="text"]');
-            if (chipDiv) {
-                let text = '';
-                for (const node of chipDiv.childNodes) {
-                    if (node.nodeType === Node.TEXT_NODE) {
-                        text += node.textContent;
-                    }
-                }
-                if (text.trim()) return text.trim();
-            }
+        // YouTube's new layout wraps text in an inner div inside .ytChipShapeChip
+        const textDiv = chip.querySelector('.ytChipShapeChip > div:first-child, [id="text"]');
+        if (textDiv && textDiv.textContent) {
+            return textDiv.textContent.replace(/\s+/g, ' ').trim();
         }
-        return chip.textContent?.trim() || '';
+
+        // Fallback for older layouts
+        return (chip.textContent || '').replace(/\s+/g, ' ').trim();
     }
 
     function shouldSkipChip(chipText) {
@@ -75,17 +78,10 @@
         return false;
     }
 
-    /**
-     * Find the target chip to click.
-     * Returns: { chip, button, name } if a valid target exists,
-     *          null if chips aren't in the DOM yet (keep waiting),
-     *          'no-valid-target' if chips ARE loaded but none pass the filter (give up).
-     */
     function findTargetChip() {
         const chips = getChips();
 
-        // Chips not loaded yet — signal caller to keep waiting
-        if (chips.length === 0) return null;
+        if (chips.length === 0) return null; // Wait for chips
 
         let fallbackChip = null;
         let fallbackName = null;
@@ -112,7 +108,6 @@
             return { chip: fallbackChip, button: fallbackButton, name: fallbackName };
         }
 
-        // Chips are loaded but every single one is in the skip list (e.g. only All + Watched)
         return 'no-valid-target';
     }
 
@@ -130,17 +125,10 @@
         return false;
     }
 
-    /**
-     * Click the target chip.
-     * Returns: 'clicked' | 'already-selected' | 'not-found' | 'no-valid-target'
-     */
     function clickTargetChip() {
         const target = findTargetChip();
 
-        // Chips not in DOM yet
         if (target === null) return 'not-found';
-
-        // Chips loaded but nothing actionable — bail out entirely
         if (target === 'no-valid-target') return 'no-valid-target';
 
         if (targetChipName !== target.name) {
@@ -152,6 +140,7 @@
             return 'already-selected';
         }
 
+        // Click the native button
         target.button.click();
         log(`🖱️ Clicked "${target.name}"`);
         return 'clicked';
@@ -203,13 +192,10 @@
                 const result = clickTargetChip();
 
                 if (result === 'no-valid-target') {
-                    // Only skippable chips present (e.g. All + Watched) — leave YouTube alone
                     log('🚫 No valid target chips found, leaving default selection intact');
                     stopPolling();
                     return;
                 }
-
-                // 'not-found' → chips not loaded yet, keep waiting
             }
         }, POLL_INTERVAL);
     }
@@ -245,7 +231,7 @@
     }
 
     // ===== INITIALIZATION =====
-    log('🚀 Script initialized (v1.9 - stops gracefully when only skippable chips exist)');
+    log('🚀 Script initialized (v2.0)');
 
     window.addEventListener('yt-navigate-finish', handleNavigation);
     window.addEventListener('yt-page-data-updated', handleNavigation);
